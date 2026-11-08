@@ -4,9 +4,12 @@
 説明文を書き換えると、モデルがツールを使うかどうか・どんな引数で呼ぶかが変わる。
 """
 
+import random
 import json
+from datetime import datetime, timezone
 from functools import cache
 from pathlib import Path
+from uuid import uuid4
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 MAX_RESULTS = 3
@@ -77,3 +80,66 @@ def get_lecture_summary(lecture: int) -> str:
         available = sorted(p.stem for p in (DATA_DIR / "lectures").glob("*.md"))
         return f"第{lecture}回の要点はまだありません。用意されている回: {', '.join(available)}"
     return path.read_text(encoding="utf-8")
+
+def make_quiz(lecture: int) -> str:
+    """指定された講義回の用語集から復習問題を1問作成する。
+
+    ユーザーが「第2回の復習問題を出して」など、
+    特定の講義回の復習問題を求めたときに使用する。
+
+    Args:
+        lecture: 復習したい講義回の番号。
+    """
+    terms = [
+        entry
+        for entry in load_glossary()
+        if entry["lecture"] == lecture
+    ]
+
+    if not terms:
+        return f"第{lecture}回に該当する用語がありません。"
+
+    selected = random.choice(terms)
+
+    quiz = {
+        "question": f"{selected['term']}とは何ですか？",
+        "answer": selected["definition"],
+    }
+
+    return json.dumps(quiz, ensure_ascii=False)
+
+
+def save_learning_log(topic: str, summary: str) -> str:
+    """学習内容を learning_log/ フォルダに保存。
+    保存は外部状態を変更するため、実行前に人間の承認が必要。
+
+    Args:
+        topic: 学習したテーマ。
+        summary: 学習内容の要約。
+    """
+    log_dir = Path(__file__).resolve().parent.parent / "learning_log"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    now = datetime.now(timezone.utc)
+
+    filename = (
+        now.strftime("%Y%m%dT%H%M%SZ")
+        + "_"
+        + uuid4().hex[:8]
+        + ".json"
+    )
+
+    record = {
+        "topic": topic,
+        "summary": summary,
+        "created_at": now.isoformat(),
+    }
+
+    file_path = log_dir / filename
+
+    file_path.write_text(
+        json.dumps(record, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    return f"学習記録を保存しました: {file_path.name}"
