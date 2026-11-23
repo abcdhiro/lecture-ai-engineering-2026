@@ -3,6 +3,7 @@
 import argparse
 import json
 import math
+import os
 import re
 import sqlite3
 from contextlib import contextmanager
@@ -124,7 +125,7 @@ def open_index(path: Path):
         db.close()
 
 
-def search(query: str) -> list[dict]:
+def search(query: str, with_neighbors: bool | None = None) -> list[dict]:
     """質問を埋め込み、近いページを最大RAG_TOP_K件返す。"""
     if not isinstance(query, str) or not query.strip():
         raise ValueError("検索語が空です。")
@@ -135,7 +136,42 @@ def search(query: str) -> list[dict]:
                    vec_distance_cosine(embedding, ?) AS distance
             FROM chunks ORDER BY distance, page_id LIMIT ?
         """, (sqlite_vec.serialize_float32(vector), RAG_TOP_K))
-        return [dict(row) for row in rows]
+        hits = [dict(row) for row in rows]
+    if with_neighbors is None:
+        with_neighbors = os.environ.get("AIE_NEIGHBORS") == "1"
+    return add_neighbor_pages(hits) if with_neighbors else hits
+
+
+def add_neighbor_pages(hits: list[dict]) -> list[dict]:
+    """各ヒットの前後1ページを、同じdocument_idの中から重複なしで追加する。"""
+    by_doc = defaultdict(list)
+    for page in load_pages(RAG_SOURCE):
+        by_doc[page["document_id"]].append(page)
+    for doc_pages in by_doc.values():
+        doc_pages.sort(key=lambda page: page["page"])
+    position = {page["page_id"]: (doc_id, i)
+                for doc_id, doc_pages in by_doc.items()
+                for i, page in enumerate(doc_pages)}
+    hit_ids = {hit["page_id"] for hit in hits}
+    seen, results = set(), []
+    for hit in hits:
+        if hit["page_id"] in seen:
+            continue
+        seen.add(hit["page_id"])
+        results.append({**hit, "retrieved_by": "search"})
+        if hit["page_id"] not in position:
+            continue
+        doc_id, i = position[hit["page_id"]]
+        doc_pages = by_doc[doc_id]
+        for j in (i - 1, i + 1):
+            if 0 <= j < len(doc_pages):
+                page = doc_pages[j]
+                if page["page_id"] in hit_ids or page["page_id"] in seen:
+                    continue
+                seen.add(page["page_id"])
+                results.append({**page, "distance": hit["distance"],
+                                "retrieved_by": f"neighbor_of:{hit['page_id']}"})
+    return results
 
 
 def search_graph(query: str) -> dict:
@@ -151,7 +187,7 @@ def search_graph(query: str) -> dict:
             adjacent[a].add(b)
             adjacent[b].add(a)
 
-    seeds = [hit for hit in search(query) if hit["page_id"] in pages][:min(GRAPH_START_K, GRAPH_MAX_RESULTS)]
+    seeds = [hit for hit in search(query, with_neighbors=False) if hit["page_id"] in pages][:min(GRAPH_START_K, GRAPH_MAX_RESULTS)]
     seed_ids = {seed["page_id"] for seed in seeds}
     results, candidates = [], {}
     for rank, seed in enumerate(seeds):
